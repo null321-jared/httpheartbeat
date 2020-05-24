@@ -1,0 +1,8 @@
+name: HttpHeartBeat
+main: net.shadowxcraft.httpheartbeat.Main
+version: 1.0.0 BETA
+api-version: 1.13
+commands:
+  http:
+    description: Schedule or cancel a repeating HTTP request.
+    usage: /http <cancel> <schedule>
