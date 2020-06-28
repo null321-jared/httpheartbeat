@@ -40,6 +40,8 @@ public class Main extends JavaPlugin implements CommandExecutor {
 		final URL url;
 		final String method;
 		final int seconds;
+		private int numRetries = -1;
+		private int secondsPerRetry = -1;
 
 		public HttpTask(URL url, String method, int seconds) {
 			this.url = url;
@@ -53,33 +55,56 @@ public class Main extends JavaPlugin implements CommandExecutor {
 
 		@Override
 		public void run() {
+			boolean succeeded = doConnection();
+			if (!succeeded && numRetries > 0) {
+				new BukkitRunnable() {
+					int attemptedRetries = 1;
+					public void run() {
+						Bukkit.getConsoleSender().sendMessage(prefix + "Attempting retry #" + attemptedRetries + ".");
+						boolean succeeded = doConnection();
+						if (succeeded || attemptedRetries++ == numRetries) {
+							this.cancel();
+							Bukkit.getConsoleSender().sendMessage(prefix + "Done with re-attempts. Continuing with the regularly scheduled pings");
+						}
+					}
+				}.runTaskTimerAsynchronously(Main.this, secondsPerRetry * 20, secondsPerRetry * 20);
+			}
+		}
+		
+		/**
+		 * @return True if it suceeded with 200 (OK). Else false.
+		 */
+		private boolean doConnection() {
 			try {
 				HttpURLConnection connection;
-				try {
-					connection = (HttpURLConnection) url.openConnection();
-					connection.setRequestMethod(method);
-					connection.setInstanceFollowRedirects(false);
-				} catch (IOException e) {
-					e.printStackTrace();
-					Bukkit.getConsoleSender().sendMessage(prefix + "Failed to open connection.");
-					return;
-				}
+				connection = (HttpURLConnection) url.openConnection();
+				connection.setRequestMethod(method);
+				connection.setInstanceFollowRedirects(false);
 				connection.connect();
+				connection.disconnect();
 				if (connection.getResponseCode() != 200) {
 					Main.this.getLogger().warning("Received HTTP code " + connection.getResponseCode());
+					return false;
+				} else {
+					return true;
 				}
-				connection.disconnect();
 			} catch (IOException e) {
-				e.printStackTrace();
+				Bukkit.getConsoleSender().sendMessage(prefix + "Could not open connection to server.");
+				return false;
 			}
+		}
+		
+		private void setRetries(int secondsPerRetry, int numRetries) {
+			this.secondsPerRetry = secondsPerRetry;
+			this.numRetries = numRetries;
 		}
 	}
 
-	private void loadTask(String name, int seconds, URL url, String method, CommandSender sender) {
+	private HttpTask loadTask(String name, int seconds, URL url, String method, CommandSender sender) {
 		HttpTask task = new HttpTask(url, method, seconds);
 		task.schedule();
 		runningTasks.put(name, task);
-
+		return task;
 	}
 	// Commands
 
@@ -152,6 +177,41 @@ public class Main extends JavaPlugin implements CommandExecutor {
 				sender.sendMessage(prefix + "Name: " + task.getKey() + ", period: " + task.getValue().seconds
 						+ ", method: " + task.getValue().method + ", URL: " + task.getValue().url.toString());
 			}
+		} else if (args[0].equalsIgnoreCase("setretries" )) {
+			if (args.length == 4) {
+				String name = args[1].toLowerCase();
+				HttpTask task = runningTasks.get(name);
+				if (task != null) {
+					int secondsPer, numRetries;
+
+					try {
+						numRetries = Integer.parseInt(args[2]);
+					} catch (NumberFormatException e) {
+						sender.sendMessage(prefix + "Invalid retries value.");
+						return true;
+					}
+					try {
+						secondsPer = Integer.parseInt(args[3]);
+					} catch (NumberFormatException e) {
+						sender.sendMessage(prefix + "Invalid second value.");
+						return true;
+					}
+					if (secondsPer * numRetries >= task.seconds) {
+						sender.sendMessage(prefix + "The retries take longer than the set periodic time.");
+					} else if (secondsPer < 0 || numRetries < 0) {
+						sender.sendMessage(prefix + "You may not use negative values for retries.");
+					} else {
+						setRetriesToConfig(name, secondsPer, numRetries);
+						task.setRetries(secondsPer, numRetries);
+						sender.sendMessage(prefix + "Set.");
+					}
+				} else {
+					sender.sendMessage(prefix + "Could not find task. List tasks with /http list");
+				}
+			} else {
+				sender.sendMessage(prefix + "Invalid Args");
+				sendHelpMsg(sender);
+			}
 		} else {
 			sender.sendMessage(prefix + "Unknown command.");
 			sendHelpMsg(sender);
@@ -163,6 +223,7 @@ public class Main extends JavaPlugin implements CommandExecutor {
 		sender.sendMessage(prefix + "Commands:");
 		sender.sendMessage(prefix + "- /http list");
 		sender.sendMessage(prefix + "- /http delete <name>");
+		sender.sendMessage(prefix + "- /http setretries <name> <num retries> <seconds per retry>");
 		sender.sendMessage(prefix + "- /http add <name> <seconds-per> <GET|POST|HEAD|OPTIONS|PUT|DELETE|TRACE> <URL>");
 	}
 
@@ -179,6 +240,8 @@ public class Main extends JavaPlugin implements CommandExecutor {
 			ConfigurationSection sectionForRequest = section.getConfigurationSection(key);
 
 			int seconds = sectionForRequest.getInt("seconds");
+			int secondsPerRetry = sectionForRequest.getInt("seconds_per_retry", -1);
+			int numRetries = sectionForRequest.getInt("num_retries", -1);
 			final String method = sectionForRequest.getString("method");
 			final String address = sectionForRequest.getString("URL");
 
@@ -196,7 +259,11 @@ public class Main extends JavaPlugin implements CommandExecutor {
 				continue;
 			}
 
-			loadTask(name, seconds, parsedUrl, method, Bukkit.getConsoleSender());
+			HttpTask task = loadTask(name, seconds, parsedUrl, method, Bukkit.getConsoleSender());
+
+			if (task != null && secondsPerRetry != -1 && numRetries != -1) {
+				task.setRetries(secondsPerRetry, numRetries);
+			}
 		}
 	}
 
@@ -205,6 +272,13 @@ public class Main extends JavaPlugin implements CommandExecutor {
 		section.set("seconds", secondsPer);
 		section.set("method", method);
 		section.set("URL", URL);
+		this.saveConfig();
+	}
+	
+	private void setRetriesToConfig(String name, long secondsPerRetry, int numRetries) {
+		ConfigurationSection section = this.getConfig().getConfigurationSection("requests." + name);
+		section.set("seconds_per_retry", secondsPerRetry);
+		section.set("num_retries", numRetries);
 		this.saveConfig();
 	}
 
